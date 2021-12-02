@@ -1,0 +1,114 @@
+---
+title: "Spatial distributions of whales"
+author: "Alberto Rovellini"
+date: "12/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(tidyverse)
+library(sf)
+library(rbgm)
+library(viridis)
+library(maps)
+library(mapdata)
+```
+
+```{r}
+select <- dplyr::select
+```
+
+This document draws approximate distribution of whales in the GOA based on information contained in the papers from [Rone et al. (2016)](https://doi.org/10.1007/s00227-016-3052-2). This paper summarizes surveys in the central GOA from 2009, 2013, and 2015. Species observed were fin, humpback, blue, Minke, gray, and Sei whales for the mysticetes, and sperm, killer, beaked whales, harbor and Dall's porpoises, and Pacific white-sided dolphins for odontocetes. 
+
+The paper estimates densities of whales in each strata by using Detection Probability Models on whale observations from survey transects. Some notes:
+
+1. The three surveys have different efforts and spatial strata. 
+2. The resolution of spatial strata is inshore, offshore, slope, and seamount. Offshore and seamount strata are off the continental shelf and slope, so we do not consider those. Inshore and slope are present in the 2013 survey, which is the survey used to estimate densities, so let's focus on these two strata. The position of the strata does not follow the bathymetry exactly, so the mapping to our boxes is approximate. We will assume that the slope stratum maps to our 500-1000 and also 200-500 depth layers. Note that this assumption puts the deep portion of the Shelikof Strait in the Slope stratum, and this may not be appropriate
+
+Goal is to read in the boxes, assign densities based on the depth layers, calculate resulting numbers per box, and finally S1-S4. 
+```{r}
+atlantis_bgm <- read_bgm('GOA_WGS84_V4_final.bgm')
+atlantis_box <- atlantis_bgm %>% box_sf()
+atlantis_bbox <- atlantis_box %>% st_bbox()
+atlantis_crs <- atlantis_bgm$extra$projection
+
+# prepare some coastline too
+coast <- maps::map(database = 'worldHires', regions = c('USA','Canada'), plot = FALSE, fill = TRUE)
+coast_sf <- coast %>% st_as_sf(crs=4326) %>% st_transform(crs=atlantis_crs)
+```
+
+Write results from Table 6. Densities are in individuals/km$^2$. Add up densities at the level of Atlantis group or keep them at species level, depending on what we want to know.
+```{r}
+dens <- data.frame(
+  'Species'= rep(c('Blue_whale','Dalls_porpoise','Fin_whale','Humpback_whale','Killer_whale','Sperm_whale','Unidentified_large'),2),
+  'Atlantis_group' = rep(c('Whale_baleen','Dolphins','Whale_baleen','Whale_humpback','Killer_transient','Whale_tooth','Whale_baleen'),2),
+  'Stratum' = c(rep('Inshore',7), rep('Slope',7)), 
+  'Density' = c(0,0.2180,0.0680,0.0930,0.0050,0,0.0060, # inshore
+                0,0.1960,0.0130,0,0.0190,0.0030,0.0020)) # slope
+
+# add up at group level
+dens_groups <- dens %>%
+  group_by(Atlantis_group,Stratum) %>%
+  summarise(Density = sum(Density))
+```
+
+Map strata to Atlantis boxes, then write a function that for each species joins the densities. Note that the numbers per box are calculated for the sole purpose of working out the spatial distributions S1-S4, and should not be used as estimates of numbers of individuals.
+
+As always, I am wary of zeroes. For some groups zeroes only occur in the boundary and island boxes, because we force a non-zero density in all other boxes simply based on depth. However, humpbacks and toothed whales are absent from the slope and inshore sectors, respectively. Fix that.
+```{r}
+box_strata <- atlantis_box %>% 
+  rowwise() %>%
+  mutate(Stratum=ifelse(botz < -200,'Slope','Inshore'))
+
+ag <- unique(dens_groups$Atlantis_group)
+
+get_s <- function(this_group){
+  
+  sp <- dens_groups %>% filter(Atlantis_group == this_group)
+  
+  box_sp <- box_strata %>% 
+    select(.bx0,area,botz,boundary,Stratum) %>%
+    left_join(sp, by = 'Stratum') %>%
+    mutate(area_km2 = area/1000000) %>%
+    rowwise() %>%
+    mutate(N = ifelse(!isTRUE(boundary) & botz<0, area_km2*Density,0)) %>%
+    ungroup() %>%
+    mutate(Prop = N/sum(N)) %>%
+    select(.bx0,boundary,botz,Atlantis_group,Prop)
+  
+  # replace zeroes with a small number
+  min_prop <- box_sp %>% st_set_geometry(NULL) %>% filter(Prop > 0) %>% select(Prop) %>% pull() %>% min()
+  max_prop <- box_sp %>% st_set_geometry(NULL) %>% filter(Prop > 0) %>% select(Prop) %>% pull() %>% max()
+  
+  box_no_sp <- box_sp %>% st_set_geometry(NULL) %>% filter(Prop == 0 & boundary==F & botz<0) %>% nrow()
+  
+  # replace zeroes with smallest values
+  box_sp$Prop[box_sp$Prop == 0 & box_sp$boundary==F & box_sp$botz<0] <- min_prop
+  box_sp$Prop[box_sp$Prop==max_prop] <- box_sp$Prop[box_sp$Prop==max_prop] - (min_prop*box_no_sp)
+  
+  # write this out
+  write.csv(box_sp %>% st_set_geometry(NULL), paste(box_sp$Atlantis_group[1], 'S1-S4.csv', sep = '_'), row.names = FALSE)
+  
+  # make a plot
+  p <- box_sp %>% 
+    ggplot()+
+    geom_sf(aes(fill=Prop))+
+    scale_fill_viridis()+
+    geom_sf(data = coast_sf)+
+    coord_sf(xlim=c(atlantis_bbox$xmin, atlantis_bbox$xmax),ylim=c(atlantis_bbox$ymin,atlantis_bbox$ymax))+
+    theme_bw()+
+    labs(title=paste(box_sp$Atlantis_group[1], 'S1-S4', sep = ' '))
+  
+  ggsave(paste(box_sp$Atlantis_group[1], 'S1-S4.png', sep = '_'), p)
+  
+}
+
+# apply to all groups
+purrr::map(ag,get_s)
+```
+
+Aggregate into Atlantis groups instead of species. We assume that juveniles and adults have the same spatial distributions.
