@@ -91,7 +91,7 @@ get_s <- function(this_group){
   box_sp$Prop[box_sp$Prop==max_prop] <- box_sp$Prop[box_sp$Prop==max_prop] - (min_prop*box_no_sp)
   
   # write this out
-  write.csv(box_sp %>% st_set_geometry(NULL), paste(box_sp$Atlantis_group[1], 'S1-S4.csv', sep = '_'), row.names = FALSE)
+  write.csv(box_sp %>% st_set_geometry(NULL), paste('output/', box_sp$Atlantis_group[1], 'S1-S4.csv', sep = '_'), row.names = FALSE)
   
   # make a plot
   p <- box_sp %>% 
